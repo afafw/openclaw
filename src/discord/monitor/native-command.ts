@@ -9,7 +9,8 @@ import {
   type CommandOptions,
   type ComponentData,
 } from "@buape/carbon";
-import { ApplicationCommandOptionType, ButtonStyle } from "discord-api-types/v10";
+import { RequestClient } from "@buape/carbon";
+import { ApplicationCommandOptionType, ButtonStyle, MessageFlags, Routes } from "discord-api-types/v10";
 import type {
   ChatCommandDefinition,
   CommandArgDefinition,
@@ -21,6 +22,9 @@ import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { OpenClawConfig, loadConfig } from "../../config/config.js";
 import { resolveHumanDelayConfig } from "../../agents/identity.js";
 import { resolveChunkMode, resolveTextChunkLimit } from "../../auto-reply/chunk.js";
+import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
+import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
+import { convertMarkdownTables } from "../../markdown/tables.js";
 import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
@@ -53,6 +57,7 @@ import {
   resolveDiscordOwnerAllowFrom,
   resolveDiscordUserAllowed,
 } from "./allow-list.js";
+import { createDiscordRollingEditStream, type DiscordRollingEditStream } from "./edit-stream.js";
 import { resolveDiscordChannelInfo } from "./message-utils.js";
 import { resolveDiscordSenderIdentity } from "./sender-identity.js";
 import { resolveDiscordThreadParentInfo } from "./threading.js";
@@ -805,6 +810,148 @@ async function dispatchDiscordCommandInteraction(params: {
     accountId: route.accountId,
   });
 
+  const storePath = resolveStorePath(cfg.session?.store, { agentId: route.agentId });
+  const streamEditsEnabled = (() => {
+    const sessionKey = route.sessionKey?.trim();
+    if (!sessionKey) {
+      return false;
+    }
+    try {
+      const store = loadSessionStore(storePath);
+      const entry = store[sessionKey.toLowerCase()] ?? store[sessionKey];
+      return entry?.streamEdits === "on";
+    } catch {
+      return false;
+    }
+  })();
+  const streamMaxChars = Math.min(
+    resolveTextChunkLimit(cfg, "discord", accountId, { fallbackLimit: 2000 }),
+    2000,
+  );
+  const editIntervalMs = 500; // 2Hz default
+  const webhookRest = new RequestClient("webhook", { queueRequests: false });
+  const resolvedChunkMode = resolveChunkMode(cfg, "discord", accountId);
+  const tableMode = resolveMarkdownTableMode({ cfg, channel: "discord", accountId });
+  const interactionEphemeral =
+    typeof (interaction as unknown as { defaultEphemeral?: unknown }).defaultEphemeral === "boolean"
+      ? ((interaction as unknown as { defaultEphemeral: boolean }).defaultEphemeral as boolean)
+      : undefined;
+
+  let mainStream: DiscordRollingEditStream | null = null;
+  let mainStreamFailed = false;
+  let originalReplyMessageId: string | undefined;
+
+  const flushEditStream = async (stream: DiscordRollingEditStream | null) => {
+    if (!stream) {
+      return;
+    }
+    await stream.flush({ force: true });
+  };
+
+  const getMainStream = () => {
+    if (!streamEditsEnabled || mainStreamFailed) {
+      return null;
+    }
+    if (mainStream) {
+      return mainStream;
+    }
+    const clientId = interaction.client.options.clientId;
+    const token = interaction.rawData.token;
+    const webhookRoute = `${Routes.webhook(clientId, token)}?wait=true`;
+    const stream = createDiscordRollingEditStream({
+      maxChars: streamMaxChars,
+      editIntervalMs,
+      send: async (content) => {
+        if (!originalReplyMessageId) {
+          const res = await safeDiscordInteractionCall("interaction stream reply", () =>
+            interaction.reply({
+              content,
+              ...(interactionEphemeral !== undefined ? { ephemeral: interactionEphemeral } : {}),
+            }),
+          );
+          if (res === null) {
+            throw new Error("interaction expired");
+          }
+          // Editing the initial interaction reply uses the webhook message route with '@original'.
+          originalReplyMessageId = "@original";
+          return { messageId: "@original" };
+        }
+        const res = (await webhookRest.post(webhookRoute, {
+          body: {
+            content,
+            ...(interactionEphemeral ? { flags: MessageFlags.Ephemeral } : {}),
+          },
+        })) as { id?: string };
+        const messageId = res?.id ? String(res.id) : "";
+        if (!messageId) {
+          throw new Error("missing follow-up message id");
+        }
+        return { messageId };
+      },
+      edit: async (messageId, content) => {
+        // Use the interaction webhook to edit both @original and follow-ups.
+        const targetMessageId =
+          originalReplyMessageId && messageId === originalReplyMessageId ? "@original" : messageId;
+        // Follow-up messages are edited via webhookMessage route.
+        await webhookRest.patch(Routes.webhookMessage(clientId, token, targetMessageId), {
+          body: { content },
+        });
+      },
+      onError: () => {
+        mainStreamFailed = true;
+        stream.stop();
+        mainStream = null;
+      },
+    });
+    mainStream = stream;
+    return stream;
+  };
+
+  let reasoningStream: DiscordRollingEditStream | null = null;
+  let reasoningStreamFailed = false;
+  let lastReasoningText = "";
+
+  const getReasoningStream = () => {
+    if (reasoningStreamFailed) {
+      return null;
+    }
+    if (reasoningStream) {
+      return reasoningStream;
+    }
+    const clientId = interaction.client.options.clientId;
+    const token = interaction.rawData.token;
+    const webhookRoute = `${Routes.webhook(clientId, token)}?wait=true`;
+    const stream = createDiscordRollingEditStream({
+      maxChars: streamMaxChars,
+      editIntervalMs,
+      send: async (content) => {
+        const res = (await webhookRest.post(webhookRoute, {
+          body: {
+            content,
+            ...(interactionEphemeral ? { flags: MessageFlags.Ephemeral } : {}),
+          },
+        })) as { id?: string; channel_id?: string };
+        const messageId = res?.id ? String(res.id) : "";
+        if (!messageId) {
+          throw new Error("missing follow-up message id");
+        }
+        return { messageId };
+      },
+      edit: async (messageId, content) => {
+        await webhookRest.patch(Routes.webhookMessage(clientId, token, messageId), {
+          body: { content },
+        });
+      },
+      onError: () => {
+        reasoningStreamFailed = true;
+        reasoningStream = null;
+        stream.stop();
+      },
+    });
+    reasoningStream = stream;
+    return stream;
+  };
+
   let didReply = false;
   await dispatchReplyWithDispatcher({
     ctx: ctxPayload,
@@ -812,17 +959,43 @@ async function dispatchDiscordCommandInteraction(params: {
     dispatcherOptions: {
       ...prefixOptions,
       humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
-      deliver: async (payload) => {
+      deliver: async (payload, info) => {
         try {
+          if (
+            streamEditsEnabled &&
+            info.kind === "block" &&
+            payload.text &&
+            !payload.mediaUrl &&
+            (payload.mediaUrls?.length ?? 0) === 0
+          ) {
+            const stream = getMainStream();
+            if (stream) {
+              const rendered = convertMarkdownTables(payload.text, tableMode);
+              try {
+                await stream.append(rendered, { mode: "join", joiner: "\n\n" });
+                didReply = true;
+                return;
+              } catch {
+                mainStreamFailed = true;
+                mainStream?.stop();
+                mainStream = null;
+              }
+            }
+          }
+
+          if (info.kind !== "block") {
+            await flushEditStream(mainStream);
+            await flushEditStream(reasoningStream);
+          }
+
           await deliverDiscordInteractionReply({
             interaction,
             payload,
-            textLimit: resolveTextChunkLimit(cfg, "discord", accountId, {
-              fallbackLimit: 2000,
-            }),
+            textLimit: streamMaxChars,
             maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
             preferFollowUp: preferFollowUp || didReply,
-            chunkMode: resolveChunkMode(cfg, "discord", accountId),
+            chunkMode: resolvedChunkMode,
+            ephemeral: interactionEphemeral,
           });
         } catch (error) {
           if (isDiscordUnknownInteraction(error)) {
@@ -843,9 +1016,35 @@ async function dispatchDiscordCommandInteraction(params: {
         typeof discordConfig?.blockStreaming === "boolean"
           ? !discordConfig.blockStreaming
           : undefined,
+      onReasoningStream: async (payload) => {
+        try {
+          const next = payload.text ?? "";
+          if (!next.trim()) {
+            return;
+          }
+          const stream = getReasoningStream();
+          if (!stream) {
+            return;
+          }
+          if (lastReasoningText && !next.startsWith(lastReasoningText)) {
+            reasoningStream?.stop();
+            reasoningStream = null;
+            lastReasoningText = "";
+          }
+          const delta = next.startsWith(lastReasoningText)
+            ? next.slice(lastReasoningText.length)
+            : next;
+          await stream.append(delta, { mode: "raw" });
+          lastReasoningText = next;
+        } catch {
+          // Best-effort; ignore reasoning stream failures.
+        }
+      },
       onModelSelected,
     },
   });
+  await flushEditStream(mainStream);
+  await flushEditStream(reasoningStream);
 }
 
 async function deliverDiscordInteractionReply(params: {
@@ -855,6 +1054,7 @@ async function deliverDiscordInteractionReply(params: {
   maxLinesPerMessage?: number;
   preferFollowUp: boolean;
   chunkMode: "length" | "newline";
+  ephemeral?: boolean;
 }) {
   const { interaction, payload, textLimit, maxLinesPerMessage, preferFollowUp, chunkMode } = params;
   const mediaList = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
@@ -877,11 +1077,17 @@ async function deliverDiscordInteractionReply(params: {
         : { content };
     await safeDiscordInteractionCall("interaction send", async () => {
       if (!preferFollowUp && !hasReplied) {
-        await interaction.reply(payload);
+        await interaction.reply({
+          ...payload,
+          ...(params.ephemeral !== undefined ? { ephemeral: params.ephemeral } : {}),
+        });
         hasReplied = true;
         return;
       }
-      await interaction.followUp(payload);
+      await interaction.followUp({
+        ...payload,
+        ...(params.ephemeral !== undefined ? { ephemeral: params.ephemeral } : {}),
+      });
       hasReplied = true;
     });
   };

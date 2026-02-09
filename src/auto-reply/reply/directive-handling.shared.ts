@@ -40,6 +40,13 @@ export const formatReasoningEvent = (level: ReasoningLevel) => {
   return "Reasoning OFF — hide <think>.";
 };
 
+export const formatStreamEditsEvent = (level: "on" | "off") => {
+  if (level === "on") {
+    return "Stream edits ON — Discord may edit messages while streaming.";
+  }
+  return "Stream edits OFF — Discord will send streaming chunks as separate messages.";
+};
+
 export function formatElevatedUnavailableText(params: {
   runtimeSandboxed: boolean;
   failures?: Array<{ gate: string; key: string }>;

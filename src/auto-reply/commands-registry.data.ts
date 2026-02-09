@@ -411,7 +411,8 @@ function buildChatCommands(): ChatCommandDefinition[] {
       key: "compact",
       description: "Compact the session context.",
       textAlias: "/compact",
-      scope: "text",
+      nativeName: "compact",
+      scope: "both",
       category: "session",
       args: [
         {
@@ -453,6 +454,20 @@ function buildChatCommands(): ChatCommandDefinition[] {
         },
       ],
       argsMenu: "auto",
+    }),
+    defineChatCommand({
+      key: "stream",
+      nativeName: "stream",
+      description: "Toggle Discord edit-in-place streaming.",
+      textAlias: "/stream",
+      category: "options",
+      args: [
+        {
+          name: "enabled",
+          description: "Enable edit-in-place streaming",
+          type: "boolean",
+        },
+      ],
     }),
     defineChatCommand({
       key: "reasoning",

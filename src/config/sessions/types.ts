@@ -41,6 +41,8 @@ export type SessionEntry = {
   thinkingLevel?: string;
   verboseLevel?: string;
   reasoningLevel?: string;
+  /** Discord-only: when on, stream assistant output by editing the last message (instead of sending many messages). */
+  streamEdits?: "on" | "off";
   elevatedLevel?: string;
   ttsAuto?: TtsAutoMode;
   execHost?: string;

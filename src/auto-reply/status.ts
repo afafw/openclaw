@@ -403,6 +403,7 @@ export function buildStatusMessage(args: StatusArgs): string {
     `Runtime: ${runtime.label}`,
     `Think: ${thinkLevel}`,
     verboseLabel,
+    entry?.streamEdits === "on" ? "Stream edits: on" : null,
     reasoningLevel !== "off" ? `Reasoning: ${reasoningLevel}` : null,
     elevatedLabel,
   ];

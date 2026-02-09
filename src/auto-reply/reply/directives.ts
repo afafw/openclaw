@@ -1,10 +1,10 @@
-import type { NoticeLevel, ReasoningLevel } from "../thinking.js";
-import { escapeRegExp } from "../../utils.js";
+import type { NoticeLevel, ReasoningLevel, StreamEditsLevel } from "../thinking.js";
 import {
   type ElevatedLevel,
   normalizeElevatedLevel,
   normalizeNoticeLevel,
   normalizeReasoningLevel,
+  normalizeStreamEditsLevel,
   normalizeThinkLevel,
   normalizeVerboseLevel,
   type ThinkLevel,
@@ -17,6 +17,8 @@ type ExtractedLevel<T> = {
   rawLevel?: string;
   hasDirective: boolean;
 };
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const matchLevelDirective = (
   body: string,
@@ -188,5 +190,23 @@ export function extractStatusDirective(body?: string): {
   return extractSimpleDirective(body, ["status"]);
 }
 
-export type { ElevatedLevel, NoticeLevel, ReasoningLevel, ThinkLevel, VerboseLevel };
+export function extractStreamDirective(body?: string): {
+  cleaned: string;
+  streamEdits?: StreamEditsLevel;
+  rawLevel?: string;
+  hasDirective: boolean;
+} {
+  if (!body) {
+    return { cleaned: "", hasDirective: false };
+  }
+  const extracted = extractLevelDirective(body, ["stream"], normalizeStreamEditsLevel);
+  return {
+    cleaned: extracted.cleaned,
+    streamEdits: extracted.level,
+    rawLevel: extracted.rawLevel,
+    hasDirective: extracted.hasDirective,
+  };
+}
+
+export type { ElevatedLevel, NoticeLevel, ReasoningLevel, StreamEditsLevel, ThinkLevel, VerboseLevel };
 export { extractExecDirective } from "./exec/directive.js";

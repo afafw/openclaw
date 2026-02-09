@@ -8,7 +8,7 @@ import {
   extractThinkDirective,
   extractVerboseDirective,
 } from "./reply.js";
-import { extractStatusDirective } from "./reply/directives.js";
+import { extractStatusDirective, extractStreamDirective } from "./reply/directives.js";
 
 describe("directive parsing", () => {
   it("ignores verbose directive inside URL", () => {
@@ -47,6 +47,26 @@ describe("directive parsing", () => {
     const res = extractReasoningDirective("/reasoning stream please");
     expect(res.hasDirective).toBe(true);
     expect(res.reasoningLevel).toBe("stream");
+  });
+
+  it("matches stream directive", () => {
+    const res = extractStreamDirective("/stream true please");
+    expect(res.hasDirective).toBe(true);
+    expect(res.streamEdits).toBe("on");
+  });
+
+  it("matches stream off directive", () => {
+    const res = extractStreamDirective("/stream off please");
+    expect(res.hasDirective).toBe(true);
+    expect(res.streamEdits).toBe("off");
+  });
+
+  it("matches stream with no argument", () => {
+    const res = extractStreamDirective("/stream:");
+    expect(res.hasDirective).toBe(true);
+    expect(res.streamEdits).toBeUndefined();
+    expect(res.rawLevel).toBeUndefined();
+    expect(res.cleaned).toBe("");
   });
 
   it("matches elevated with leading space", () => {

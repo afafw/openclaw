@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "../../config/config.js";
 import type { InlineDirectives } from "./directive-handling.parse.js";
-import type { ElevatedLevel, ReasoningLevel } from "./directives.js";
+import type { ElevatedLevel, ReasoningLevel, StreamEditsLevel } from "./directives.js";
 import {
   resolveAgentDir,
   resolveDefaultAgentId,
@@ -20,7 +20,11 @@ import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { applyVerboseOverride } from "../../sessions/level-overrides.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { resolveProfileOverride } from "./directive-handling.auth.js";
-import { formatElevatedEvent, formatReasoningEvent } from "./directive-handling.shared.js";
+import {
+  formatElevatedEvent,
+  formatReasoningEvent,
+  formatStreamEditsEvent,
+} from "./directive-handling.shared.js";
 
 export async function persistInlineDirectives(params: {
   directives: InlineDirectives;
@@ -72,6 +76,7 @@ export async function persistInlineDirectives(params: {
       (agentCfg?.elevatedDefault as ElevatedLevel | undefined) ??
       (elevatedAllowed ? ("on" as ElevatedLevel) : ("off" as ElevatedLevel));
     const prevReasoningLevel = (sessionEntry.reasoningLevel as ReasoningLevel | undefined) ?? "off";
+    const prevStreamEdits = (sessionEntry.streamEdits as StreamEditsLevel | undefined) ?? "off";
     let elevatedChanged =
       directives.hasElevatedDirective &&
       directives.elevatedLevel !== undefined &&
@@ -79,6 +84,7 @@ export async function persistInlineDirectives(params: {
       elevatedAllowed;
     let reasoningChanged =
       directives.hasReasoningDirective && directives.reasoningLevel !== undefined;
+    let streamChanged = directives.hasStreamDirective && directives.streamEdits !== undefined;
     let updated = false;
 
     if (directives.hasThinkDirective && directives.thinkLevel) {
@@ -103,6 +109,17 @@ export async function persistInlineDirectives(params: {
         reasoningChanged ||
         (directives.reasoningLevel !== prevReasoningLevel &&
           directives.reasoningLevel !== undefined);
+      updated = true;
+    }
+    if (directives.hasStreamDirective && directives.streamEdits) {
+      if (directives.streamEdits === "off") {
+        delete sessionEntry.streamEdits;
+      } else {
+        sessionEntry.streamEdits = directives.streamEdits;
+      }
+      streamChanged =
+        streamChanged ||
+        (directives.streamEdits !== prevStreamEdits && directives.streamEdits !== undefined);
       updated = true;
     }
     if (
@@ -215,6 +232,13 @@ export async function persistInlineDirectives(params: {
         enqueueSystemEvent(formatReasoningEvent(nextReasoning), {
           sessionKey,
           contextKey: "mode:reasoning",
+        });
+      }
+      if (streamChanged) {
+        const nextStream = (sessionEntry.streamEdits ?? "off") as StreamEditsLevel;
+        enqueueSystemEvent(formatStreamEditsEvent(nextStream), {
+          sessionKey,
+          contextKey: "mode:stream",
         });
       }
     }

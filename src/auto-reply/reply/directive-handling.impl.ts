@@ -3,7 +3,13 @@ import type { OpenClawConfig } from "../../config/config.js";
 import type { ExecAsk, ExecHost, ExecSecurity } from "../../infra/exec-approvals.js";
 import type { ReplyPayload } from "../types.js";
 import type { InlineDirectives } from "./directive-handling.parse.js";
-import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "./directives.js";
+import type {
+  ElevatedLevel,
+  ReasoningLevel,
+  StreamEditsLevel,
+  ThinkLevel,
+  VerboseLevel,
+} from "./directives.js";
 import {
   resolveAgentConfig,
   resolveAgentDir,
@@ -26,6 +32,7 @@ import {
   formatElevatedRuntimeHint,
   formatElevatedUnavailableText,
   formatReasoningEvent,
+  formatStreamEditsEvent,
   withOptions,
 } from "./directive-handling.shared.js";
 
@@ -84,6 +91,7 @@ export async function handleDirectiveOnly(params: {
   currentThinkLevel?: ThinkLevel;
   currentVerboseLevel?: VerboseLevel;
   currentReasoningLevel?: ReasoningLevel;
+  currentStreamEdits?: StreamEditsLevel;
   currentElevatedLevel?: ElevatedLevel;
   surface?: string;
 }): Promise<ReplyPayload | undefined> {
@@ -108,6 +116,7 @@ export async function handleDirectiveOnly(params: {
     currentThinkLevel,
     currentVerboseLevel,
     currentReasoningLevel,
+    currentStreamEdits,
     currentElevatedLevel,
   } = params;
   const activeAgentId = resolveSessionAgentId({
@@ -194,6 +203,17 @@ export async function handleDirectiveOnly(params: {
     }
     return {
       text: `Unrecognized reasoning level "${directives.rawReasoningLevel}". Valid levels: on, off, stream.`,
+    };
+  }
+  if (directives.hasStreamDirective && !directives.streamEdits) {
+    if (!directives.rawStreamEdits) {
+      const level = currentStreamEdits ?? "off";
+      return {
+        text: withOptions(`Current stream edits: ${level}.`, "on, off"),
+      };
+    }
+    return {
+      text: `Unrecognized stream value "${directives.rawStreamEdits}". Valid: on, off.`,
     };
   }
   if (directives.hasElevatedDirective && !directives.elevatedLevel) {
@@ -301,6 +321,8 @@ export async function handleDirectiveOnly(params: {
     (elevatedAllowed ? ("on" as ElevatedLevel) : ("off" as ElevatedLevel));
   const prevReasoningLevel =
     currentReasoningLevel ?? (sessionEntry.reasoningLevel as ReasoningLevel | undefined) ?? "off";
+  const prevStreamEdits =
+    currentStreamEdits ?? (sessionEntry.streamEdits as StreamEditsLevel | undefined) ?? "off";
   let elevatedChanged =
     directives.hasElevatedDirective &&
     directives.elevatedLevel !== undefined &&
@@ -308,6 +330,7 @@ export async function handleDirectiveOnly(params: {
     elevatedAllowed;
   let reasoningChanged =
     directives.hasReasoningDirective && directives.reasoningLevel !== undefined;
+  let streamChanged = directives.hasStreamDirective && directives.streamEdits !== undefined;
   if (directives.hasThinkDirective && directives.thinkLevel) {
     if (directives.thinkLevel === "off") {
       delete sessionEntry.thinkingLevel;
@@ -329,6 +352,15 @@ export async function handleDirectiveOnly(params: {
     }
     reasoningChanged =
       directives.reasoningLevel !== prevReasoningLevel && directives.reasoningLevel !== undefined;
+  }
+  if (directives.hasStreamDirective && directives.streamEdits) {
+    if (directives.streamEdits === "off") {
+      delete sessionEntry.streamEdits;
+    } else {
+      sessionEntry.streamEdits = directives.streamEdits;
+    }
+    streamChanged =
+      directives.streamEdits !== prevStreamEdits && directives.streamEdits !== undefined;
   }
   if (directives.hasElevatedDirective && directives.elevatedLevel) {
     // Unlike other toggles, elevated defaults can be "on".
@@ -408,6 +440,13 @@ export async function handleDirectiveOnly(params: {
       contextKey: "mode:reasoning",
     });
   }
+  if (streamChanged) {
+    const nextStream = (sessionEntry.streamEdits ?? "off") as StreamEditsLevel;
+    enqueueSystemEvent(formatStreamEditsEvent(nextStream), {
+      sessionKey,
+      contextKey: "mode:stream",
+    });
+  }
 
   const parts: string[] = [];
   if (directives.hasThinkDirective && directives.thinkLevel) {
@@ -431,8 +470,15 @@ export async function handleDirectiveOnly(params: {
       directives.reasoningLevel === "off"
         ? formatDirectiveAck("Reasoning visibility disabled.")
         : directives.reasoningLevel === "stream"
-          ? formatDirectiveAck("Reasoning stream enabled (Telegram only).")
+          ? formatDirectiveAck("Reasoning stream enabled.")
           : formatDirectiveAck("Reasoning visibility enabled."),
+    );
+  }
+  if (directives.hasStreamDirective && directives.streamEdits) {
+    parts.push(
+      directives.streamEdits === "off"
+        ? formatDirectiveAck("Stream edits disabled.")
+        : formatDirectiveAck("Stream edits enabled."),
     );
   }
   if (directives.hasElevatedDirective && directives.elevatedLevel) {

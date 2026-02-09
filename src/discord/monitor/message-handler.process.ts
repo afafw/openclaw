@@ -1,4 +1,4 @@
-import { ChannelType } from "@buape/carbon";
+import { ChannelType, RequestClient } from "@buape/carbon";
 import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { DiscordMessagePreflightContext } from "./message-handler.preflight.js";
 import { resolveAckReaction, resolveHumanDelayConfig } from "../../agents/identity.js";
@@ -24,13 +24,14 @@ import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { recordInboundSession } from "../../channels/session.js";
 import { createTypingCallbacks } from "../../channels/typing.js";
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
-import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
+import { loadSessionStore, readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
+import { convertMarkdownTables } from "../../markdown/tables.js";
 import { buildAgentSessionKey } from "../../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../../routing/session-key.js";
 import { buildUntrustedChannelMetadata } from "../../security/channel-metadata.js";
 import { truncateUtf16Safe } from "../../utils.js";
-import { reactMessageDiscord, removeReactionDiscord } from "../send.js";
+import { editMessageDiscord, reactMessageDiscord, removeReactionDiscord, sendMessageDiscord } from "../send.js";
 import { normalizeDiscordSlug, resolveDiscordOwnerAllowFrom } from "./allow-list.js";
 import { resolveTimestampMs } from "./format.js";
 import {
@@ -39,6 +40,7 @@ import {
   resolveMediaList,
 } from "./message-utils.js";
 import { buildDirectLabel, buildGuildLabel, resolveReplyContext } from "./reply-context.js";
+import { createDiscordRollingEditStream, type DiscordRollingEditStream } from "./edit-stream.js";
 import { deliverDiscordReply } from "./reply-delivery.js";
 import { resolveDiscordAutoThreadReplyPlan, resolveDiscordThreadStarter } from "./threading.js";
 import { sendTyping } from "./typing.js";
@@ -343,6 +345,25 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     ? deliverTarget.slice("channel:".length)
     : message.channelId;
 
+  const streamEditsEnabled = (() => {
+    const sessionKey = ctxPayload.SessionKey?.trim();
+    if (!sessionKey) {
+      return false;
+    }
+    try {
+      const store = loadSessionStore(storePath);
+      const entry = store[sessionKey.toLowerCase()] ?? store[sessionKey];
+      return entry?.streamEdits === "on";
+    } catch {
+      return false;
+    }
+  })();
+
+  const streamMaxChars = Math.min(textLimit, 2000);
+  const editIntervalMs = 500; // 2Hz default
+  const chunkMode = resolveChunkMode(cfg, "discord", accountId);
+  const streamRest = new RequestClient(token, { queueRequests: false });
+
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg,
     agentId: route.agentId,
@@ -355,10 +376,144 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     accountId,
   });
 
+  let mainStreamChannelId: string | undefined;
+  let mainStream: DiscordRollingEditStream | null = null;
+  let mainStreamFailed = false;
+  let didMarkMainStreamSent = false;
+
+  const flushEditStream = async (stream: DiscordRollingEditStream | null) => {
+    if (!stream) {
+      return;
+    }
+    await stream.flush({ force: true });
+  };
+
+  const getMainStream = () => {
+    if (!streamEditsEnabled || mainStreamFailed) {
+      return null;
+    }
+    if (mainStream) {
+      return mainStream;
+    }
+    const stream = createDiscordRollingEditStream({
+      maxChars: streamMaxChars,
+      editIntervalMs,
+      send: async (content, options) => {
+        const replyToId = options?.replyToId;
+        const res = await sendMessageDiscord(deliverTarget, content, {
+          token,
+          retry: { attempts: 1 },
+          rest: streamRest,
+          accountId,
+          replyTo: replyToId,
+        });
+        mainStreamChannelId = res.channelId;
+        if (!didMarkMainStreamSent) {
+          didMarkMainStreamSent = true;
+          replyReference.markSent();
+        }
+        return { messageId: res.messageId };
+      },
+      edit: async (messageId, content) => {
+        if (!mainStreamChannelId) {
+          return;
+        }
+        await editMessageDiscord(
+          mainStreamChannelId,
+          messageId,
+          { content },
+          { rest: streamRest, token },
+        );
+      },
+      onError: () => {
+        mainStreamFailed = true;
+        stream.stop();
+        mainStream = null;
+      },
+    });
+    mainStream = stream;
+    return stream;
+  };
+
+  let reasoningStreamChannelId: string | undefined;
+  let reasoningStream: DiscordRollingEditStream | null = null;
+  let reasoningStreamFailed = false;
+  let lastReasoningText = "";
+
+  const getReasoningStream = () => {
+    if (reasoningStreamFailed) {
+      return null;
+    }
+    if (reasoningStream) {
+      return reasoningStream;
+    }
+    const stream = createDiscordRollingEditStream({
+      maxChars: streamMaxChars,
+      editIntervalMs,
+      send: async (content) => {
+        const res = await sendMessageDiscord(deliverTarget, content, {
+          token,
+          rest: streamRest,
+          retry: { attempts: 1 },
+          accountId,
+        });
+        reasoningStreamChannelId = res.channelId;
+        return { messageId: res.messageId };
+      },
+      edit: async (messageId, content) => {
+        if (!reasoningStreamChannelId) {
+          return;
+        }
+        await editMessageDiscord(
+          reasoningStreamChannelId,
+          messageId,
+          { content },
+          { rest: streamRest, token },
+        );
+      },
+      onError: () => {
+        reasoningStreamFailed = true;
+        stream.stop();
+        reasoningStream = null;
+      },
+    });
+    reasoningStream = stream;
+    return stream;
+  };
+
   const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
     ...prefixOptions,
     humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
-    deliver: async (payload: ReplyPayload) => {
+    deliver: async (payload: ReplyPayload, info) => {
+      if (
+        streamEditsEnabled &&
+        info.kind === "block" &&
+        payload.text &&
+        !payload.mediaUrl &&
+        (payload.mediaUrls?.length ?? 0) === 0
+      ) {
+        const stream = getMainStream();
+        if (stream) {
+          const rendered = convertMarkdownTables(payload.text, tableMode);
+          const replyToId = !stream.hasStarted() ? replyReference.use() : undefined;
+          try {
+            await stream.append(rendered, { mode: "join", joiner: "\n\n", replyToId });
+            return;
+          } catch {
+            // Fall back to normal delivery if edits fail mid-stream.
+            mainStreamFailed = true;
+            mainStream?.stop();
+            mainStream = null;
+          }
+        }
+      }
+
+      // Flush stream buffers before sending tool/final messages so edits don't lag too far behind.
+      if (info.kind !== "block") {
+        await flushEditStream(mainStream);
+        await flushEditStream(reasoningStream);
+      }
+
       const replyToId = replyReference.use();
       await deliverDiscordReply({
         replies: [payload],
@@ -371,7 +526,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         textLimit,
         maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
         tableMode,
-        chunkMode: resolveChunkMode(cfg, "discord", accountId),
+        chunkMode,
       });
       replyReference.markSent();
     },
@@ -402,9 +557,37 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         typeof discordConfig?.blockStreaming === "boolean"
           ? !discordConfig.blockStreaming
           : undefined,
+      onReasoningStream: async (payload) => {
+        try {
+          const next = payload.text ?? "";
+          if (!next.trim()) {
+            return;
+          }
+          const stream = getReasoningStream();
+          if (!stream) {
+            return;
+          }
+          if (lastReasoningText && !next.startsWith(lastReasoningText)) {
+            // Rare: reasoning rewound or changed. Restart the stream on a new message.
+            reasoningStream?.stop();
+            reasoningStream = null;
+            reasoningStreamChannelId = undefined;
+            lastReasoningText = "";
+          }
+          const delta = next.startsWith(lastReasoningText)
+            ? next.slice(lastReasoningText.length)
+            : next;
+          await stream.append(delta, { mode: "raw" });
+          lastReasoningText = next;
+        } catch {
+          // Best-effort; ignore reasoning stream failures.
+        }
+      },
       onModelSelected,
     },
   });
+  await flushEditStream(mainStream);
+  await flushEditStream(reasoningStream);
   markDispatchIdle();
   if (!queuedFinal) {
     if (isGuildMessage) {

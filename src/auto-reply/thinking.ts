@@ -4,6 +4,7 @@ export type NoticeLevel = "off" | "on" | "full";
 export type ElevatedLevel = "off" | "on" | "ask" | "full";
 export type ElevatedMode = "off" | "ask" | "full";
 export type ReasoningLevel = "off" | "on" | "stream";
+export type StreamEditsLevel = "off" | "on";
 export type UsageDisplayLevel = "off" | "tokens" | "full";
 
 function normalizeProviderId(provider?: string | null): string {
@@ -228,6 +229,21 @@ export function normalizeReasoningLevel(raw?: string | null): ReasoningLevel | u
   }
   if (["stream", "streaming", "draft", "live"].includes(key)) {
     return "stream";
+  }
+  return undefined;
+}
+
+// Normalize per-session stream-edits flags used to toggle edit-in-place streaming on Discord.
+export function normalizeStreamEditsLevel(raw?: string | null): StreamEditsLevel | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const key = raw.toLowerCase();
+  if (["off", "false", "no", "0", "disable", "disabled"].includes(key)) {
+    return "off";
+  }
+  if (["on", "true", "yes", "1", "enable", "enabled"].includes(key)) {
+    return "on";
   }
   return undefined;
 }

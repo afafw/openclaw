@@ -236,6 +236,7 @@ export async function resolveReplyDirectives(params: {
     parsedDirectives.hasThinkDirective ||
     parsedDirectives.hasVerboseDirective ||
     parsedDirectives.hasReasoningDirective ||
+    parsedDirectives.hasStreamDirective ||
     parsedDirectives.hasElevatedDirective ||
     parsedDirectives.hasExecDirective ||
     parsedDirectives.hasModelDirective ||
@@ -266,6 +267,9 @@ export async function resolveReplyDirectives(params: {
         hasThinkDirective: false,
         hasVerboseDirective: false,
         hasReasoningDirective: false,
+        hasStreamDirective: false,
+        streamEdits: undefined,
+        rawStreamEdits: undefined,
         hasStatusDirective: false,
         hasModelDirective: false,
         hasQueueDirective: false,

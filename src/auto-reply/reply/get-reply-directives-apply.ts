@@ -109,6 +109,9 @@ export async function applyInlineDirectiveOverrides(params: {
       hasThinkDirective: false,
       hasVerboseDirective: false,
       hasReasoningDirective: false,
+      hasStreamDirective: false,
+      streamEdits: undefined,
+      rawStreamEdits: undefined,
       hasElevatedDirective: false,
       hasExecDirective: false,
       execHost: undefined,
@@ -155,6 +158,7 @@ export async function applyInlineDirectiveOverrides(params: {
       (agentCfg?.verboseDefault as VerboseLevel | undefined);
     const currentReasoningLevel =
       (sessionEntry?.reasoningLevel as ReasoningLevel | undefined) ?? "off";
+    const currentStreamEdits = (sessionEntry?.streamEdits as "on" | "off" | undefined) ?? "off";
     const currentElevatedLevel =
       (sessionEntry?.elevatedLevel as ElevatedLevel | undefined) ??
       (agentCfg?.elevatedDefault as ElevatedLevel | undefined);
@@ -182,6 +186,7 @@ export async function applyInlineDirectiveOverrides(params: {
       currentThinkLevel,
       currentVerboseLevel,
       currentReasoningLevel,
+      currentStreamEdits,
       currentElevatedLevel,
       surface: ctx.Surface,
     });
@@ -220,6 +225,7 @@ export async function applyInlineDirectiveOverrides(params: {
     directives.hasThinkDirective ||
     directives.hasVerboseDirective ||
     directives.hasReasoningDirective ||
+    directives.hasStreamDirective ||
     directives.hasElevatedDirective ||
     directives.hasExecDirective ||
     directives.hasModelDirective ||
